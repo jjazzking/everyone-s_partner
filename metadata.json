@@ -1,0 +1,6 @@
+{
+  "name": "감사보고서 리뷰 에이전트 PoC",
+  "description": "검토보고서 및 별도·연결 주석 초안을 분석하여 직급별 예상 질문과 지적 코멘트를 예측하는 감사 리뷰 에이전트",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
