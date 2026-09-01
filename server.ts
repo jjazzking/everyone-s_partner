@@ -1,13 +1,39 @@
 import express from "express";
+import fs from "fs";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+
+// Cloud Run(및 대부분의 PaaS)은 PORT 환경변수로 리슨 포트를 주입한다.
+// 3000으로 하드코딩하면 컨테이너가 준비 상태가 되지 못해 빈 화면/503이 된다.
+const PORT = Number(process.env.PORT) || 3000;
+
+// 배포 시에는 `node dist/server.cjs`로 실행되므로 __dirname이 곧 dist 경로다.
+// process.cwd()는 컨테이너 실행 위치에 따라 달라져 index.html을 못 찾는 원인이 된다.
+function isBuiltDir(dir: string): boolean {
+  return (
+    fs.existsSync(path.join(dir, "index.html")) &&
+    fs.existsSync(path.join(dir, "assets"))
+  );
+}
+
+function resolveDistPath(): string | null {
+  // 1) 번들된 서버 자신이 놓인 디렉터리(dist). tsx로 실행하는 개발 모드에서는
+  //    ESM이라 __dirname이 없으므로 이 경로는 건너뛰고 Vite 미들웨어로 간다.
+  if (typeof __dirname !== "undefined" && isBuiltDir(__dirname)) {
+    return __dirname;
+  }
+  // 2) 명시적으로 production으로 실행된 경우의 표준 위치.
+  const cwdDist = path.join(process.cwd(), "dist");
+  if (process.env.NODE_ENV === "production" && isBuiltDir(cwdDist)) {
+    return cwdDist;
+  }
+  return null;
+}
 
 app.use(express.json({ limit: "15mb" }));
 
@@ -394,20 +420,39 @@ ${drafterReply}
   }
 });
 
-// Start server and mount Vite
+// Start server and mount static assets (또는 개발 시 Vite 미들웨어)
 async function start() {
-  if (process.env.NODE_ENV !== "production") {
+  const distPath = resolveDistPath();
+
+  if (distPath) {
+    // 빌드 산출물이 확인되면 NODE_ENV 값과 무관하게 정적 서빙한다.
+    // (배포 환경에서 NODE_ENV가 비어 있으면 Vite 개발 미들웨어가 떠서
+    //  소스가 없는 컨테이너에서는 흰 화면이 되었다)
+    const indexHtml = path.join(distPath, "index.html");
+
+    // 서버 번들과 소스맵이 정적으로 노출되지 않도록 차단한다.
+    app.use((req, res, next) => {
+      if (/\.(cjs|js\.map|cjs\.map)$/.test(req.path)) {
+        return res.status(404).end();
+      }
+      next();
+    });
+
+    app.use(express.static(distPath, { index: false }));
+    app.get("*", (req, res) => {
+      res.sendFile(indexHtml);
+    });
+
+    console.log(`Serving static build from ${distPath}`);
+  } else {
+    // 개발 모드: Vite를 미들웨어로 마운트한다.
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    console.log("Serving via Vite dev middleware");
   }
 
   app.listen(PORT, "0.0.0.0", () => {
@@ -415,4 +460,7 @@ async function start() {
   });
 }
 
-start();
+start().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});
